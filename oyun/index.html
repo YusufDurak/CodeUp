@@ -1,0 +1,498 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kaçak Pati</title>
+<style>
+  :root {
+    --bg: #1b1d22; --panel: #262930; --text: #e8e6e1; --muted: #9a9ca3;
+    --patrol: #4caf7a; --suspicious: #e8b53a; --chase: #e0524a; --search: #6aa3e0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+  .wrap { display: flex; flex-wrap: wrap; gap: 16px; padding: 16px; justify-content: center; }
+  canvas { background: #000; border-radius: 8px; max-width: 100%; height: auto; display: block; }
+  .panel { background: var(--panel); border-radius: 8px; padding: 14px 16px; width: 300px; max-width: 100%; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 6px; }
+  .state { font-size: 18px; font-weight: 700; }
+  .bar { height: 10px; background: #111; border-radius: 5px; overflow: hidden; }
+  .bar > div { height: 100%; width: 0; background: var(--suspicious); }
+  ul { margin: 0; padding-left: 18px; }
+  .log { font-size: 12px; color: var(--muted); list-style: none; padding: 0; }
+  .log li { padding: 2px 0; border-bottom: 1px solid #333; }
+  .log b { color: var(--text); font-weight: 600; }
+  kbd { background: #111; border: 1px solid #444; border-radius: 3px; padding: 0 4px; font-size: 12px; }
+  .yes { color: var(--chase); font-weight: 600; } .no { color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <canvas id="c" width="800" height="560"></canvas>
+  <div class="panel">
+    <h1>Kaçak Pati</h1>
+    <div>Pazardan en az <b>5 balık</b> çal ve sağdaki <b>ÇIKIŞ</b>'tan kaç. Balıkçı Rıza'ya yakalanma!</div>
+    <h2>Kontroller</h2>
+    <div><kbd>WASD</kbd>/<kbd>Oklar</kbd> hareket · <kbd>Shift</kbd> sinsi yürü (sessiz, yavaş) · <kbd>H</kbd> AI beynini göster/gizle · <kbd>R</kbd> yeniden başla</div>
+
+    <h2>Rıza'nın beyni</h2>
+    <div class="state" id="st">—</div>
+    <div style="margin:6px 0 2px">Şüphe</div>
+    <div class="bar"><div id="alert"></div></div>
+    <div style="margin:6px 0 2px">Öfke (fark ettiği kayıp balık): <b id="anger">0</b></div>
+
+    <h2>Algı (ne görüyor/duyuyor)</h2>
+    <ul>
+      <li>Kediyi görüyor: <span id="pSee"></span></li>
+      <li>Ses duydu: <span id="pHear"></span></li>
+      <li>Son bilinen konum: <span id="pLast"></span></li>
+      <li>Görüş menzili: <span id="pRange"></span></li>
+    </ul>
+
+    <h2>Karar günlüğü</h2>
+    <ul class="log" id="log"></ul>
+  </div>
+</div>
+<script>
+"use strict";
+const TILE = 40;
+const MAP_SRC = [
+  "####################",
+  "#P.....C......C....#",
+  "#..SSS.C..SSS.C....#",
+  "#..f......f........#",
+  "#......CC.....CCC..#",
+  "#.SS...........f...#",
+  "#.Sf....SSSS.......#",
+  "#.......f..........#",
+  "#..CC.........SS...#",
+  "#.....C....C..Sf...#",
+  "#..f..C....C.......#",
+  "#.SSS.......CCC..N.#",
+  "#..............f...E",
+  "####################",
+];
+const W = MAP_SRC[0].length, H = MAP_SRC.length;
+const NEED = 5;
+const FOV = Math.PI * 0.42;          // ~75 derece görüş açısı
+const BASE_RANGE = 200;
+const WALK = 58, INVESTIGATE_SPEED = 75, BASE_RUN = 118;
+const PLAYER_RUN = 150, PLAYER_SNEAK = 68;
+const NOISE_RUN = 150, NOISE_GRAB = 110;
+const PATROL = [
+  { x: 17, y: 11 }, { x: 17, y: 6, check: true }, { x: 11, y: 3, check: true },
+  { x: 4, y: 3, check: true }, { x: 4, y: 7, check: true }, { x: 8, y: 8, check: true },
+  { x: 4, y: 10, check: true }, { x: 12, y: 12, check: true }, { x: 16, y: 10, check: true },
+];
+const STATE_INFO = {
+  PATROL:      { label: "Devriye",   color: "#4caf7a" },
+  CHECK:       { label: "Tezgahı kontrol ediyor", color: "#4caf7a" },
+  INVESTIGATE: { label: "Şüphelendi", color: "#e8b53a" },
+  CHASE:       { label: "Kovalıyor!", color: "#e0524a" },
+  SEARCH:      { label: "Arıyor",    color: "#6aa3e0" },
+};
+
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+const keys = {};
+let map, fishes, player, npc, noise, game, time, showBrain = true, logEntries;
+
+// ---------- yardımcılar ----------
+const center = t => ({ x: t.x * TILE + TILE / 2, y: t.y * TILE + TILE / 2 });
+const toTile = (x, y) => ({ x: Math.floor(x / TILE), y: Math.floor(y / TILE) });
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const angDiff = (a, b) => { let d = a - b; while (d > Math.PI) d -= 2 * Math.PI; while (d < -Math.PI) d += 2 * Math.PI; return d; };
+function tileAt(x, y) {
+  const t = toTile(x, y);
+  if (t.x < 0 || t.y < 0 || t.x >= W || t.y >= H) return "#";
+  return map[t.y][t.x];
+}
+const blocksMove = c => c === "#" || c === "C" || c === "S";
+const blocksSight = c => c === "#" || c === "C";   // tezgahlar alçak: görüşü kesmez
+
+function lineOfSight(a, b) {
+  const d = dist(a, b), n = Math.ceil(d / 6);
+  for (let i = 1; i < n; i++) {
+    const t = i / n;
+    if (blocksSight(tileAt(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))) return false;
+  }
+  return true;
+}
+
+function findPath(from, to) {
+  if (to.x < 0 || to.y < 0 || to.x >= W || to.y >= H || blocksMove(map[to.y][to.x])) return [];
+  const key = t => t.y * W + t.x, prev = new Map([[key(from), null]]), q = [from];
+  while (q.length) {
+    const c = q.shift();
+    if (c.x === to.x && c.y === to.y) break;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const n = { x: c.x + dx, y: c.y + dy };
+      if (n.x < 0 || n.y < 0 || n.x >= W || n.y >= H || blocksMove(map[n.y][n.x]) || prev.has(key(n))) continue;
+      prev.set(key(n), c); q.push(n);
+    }
+  }
+  if (!prev.has(key(to))) return [];
+  const out = [];
+  for (let c = to; c; c = prev.get(key(c))) out.push(c);
+  return out.reverse().slice(1);
+}
+
+function moveWithCollision(e, dx, dy, r) {
+  const hits = (x, y) => [[-r, -r], [r, -r], [-r, r], [r, r]].some(([ox, oy]) => blocksMove(tileAt(x + ox, y + oy)));
+  if (!hits(e.x + dx, e.y)) e.x += dx;
+  if (!hits(e.x, e.y + dy)) e.y += dy;
+}
+
+function log(text) {
+  logEntries.unshift({ t: time, text });
+  logEntries.length = Math.min(logEntries.length, 7);
+}
+
+// ---------- kurulum ----------
+function reset() {
+  map = MAP_SRC.map(r => r.split(""));
+  fishes = [];
+  time = 0; noise = null; logEntries = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const c = map[y][x];
+    if (c === "f") { fishes.push({ ...center({ x, y }), taken: false, noticed: false }); map[y][x] = "."; }
+    if (c === "P") { player = { ...center({ x, y }), fish: 0, sneaking: false, moving: false }; map[y][x] = "."; }
+    if (c === "N") { npc = makeNpc(center({ x, y })); map[y][x] = "."; }
+  }
+  game = { state: "intro", msg: "" };
+  log("Rıza tezgahlarını açtı, devriyeye başladı.");
+}
+
+function makeNpc(pos) {
+  return {
+    x: pos.x, y: pos.y, facing: Math.PI, state: "PATROL",
+    alert: 0, anger: 0, wp: 0, path: [], pathTarget: null, repathT: 0,
+    target: null, lastKnown: null, lastSeenT: -99, stateT: 0, searchBase: 0,
+    bubble: null, percept: { seesCat: false, heard: null },
+  };
+}
+
+// ---------- oyuncu ----------
+function updatePlayer(dt) {
+  let dx = 0, dy = 0;
+  if (keys.ArrowLeft || keys.KeyA) dx--;
+  if (keys.ArrowRight || keys.KeyD) dx++;
+  if (keys.ArrowUp || keys.KeyW) dy--;
+  if (keys.ArrowDown || keys.KeyS) dy++;
+  player.sneaking = !!(keys.ShiftLeft || keys.ShiftRight);
+  player.moving = dx !== 0 || dy !== 0;
+  if (player.moving) {
+    const len = Math.hypot(dx, dy), sp = player.sneaking ? PLAYER_SNEAK : PLAYER_RUN;
+    moveWithCollision(player, dx / len * sp * dt, dy / len * sp * dt, 13);
+    if (!player.sneaking) makeNoise(player.x, player.y, NOISE_RUN);
+  }
+  for (const f of fishes) if (!f.taken && dist(f, player) < 24) {
+    f.taken = true; player.fish++;
+    makeNoise(f.x, f.y, NOISE_GRAB);
+  }
+  if (tileAt(player.x, player.y) === "E") {
+    if (player.fish >= NEED) { game.state = "won"; game.msg = `Kaçtın! ${player.fish} balıkla ziyafet var.`; }
+    else game.hint = `Kapı açık ama en az ${NEED} balık lazım (${player.fish}/${NEED}).`;
+  } else game.hint = "";
+}
+
+function makeNoise(x, y, r) {
+  if (!noise || r >= noise.r || time - noise.t > 0.05) noise = { x, y, r, t: time };
+}
+
+// ---------- NPC: ALGI ----------
+function perceive() {
+  const p = npc.percept, range = visionRange();
+  const d = dist(npc, player);
+  const inCone = Math.abs(angDiff(Math.atan2(player.y - npc.y, player.x - npc.x), npc.facing)) < FOV / 2;
+  const los = lineOfSight(npc, player);
+  p.seesCat = los && ((d < range && inCone) || d < 42);   // çok yakındaysa arkasını da sezer
+  if (p.seesCat) { npc.lastKnown = { x: player.x, y: player.y }; npc.lastSeenT = time; }
+  p.heard = noise && time - noise.t < 0.1 && dist(npc, noise) < noise.r ? { x: noise.x, y: noise.y } : null;
+  p.dist = d;
+}
+const visionRange = () => BASE_RANGE + npc.anger * 25;
+const runSpeed = () => BASE_RUN + npc.anger * 8;
+
+// ---------- NPC: KARAR ----------
+function setState(s, reason) {
+  if (npc.state !== s) log(`<b>${STATE_INFO[s].label}</b> — ${reason}`);
+  npc.state = s; npc.stateT = 0; npc.path = []; npc.pathTarget = null;
+}
+
+function decide(dt) {
+  const p = npc.percept;
+  // Şüphe ölçeği: yakın ve açıkta olan kedi daha hızlı fark edilir, sinsi yürümek yavaşlatır.
+  if (p.seesCat) {
+    const closeness = 1 - Math.min(1, p.dist / visionRange());
+    const gain = (0.9 + 2.6 * closeness) * (player.sneaking ? 0.55 : 1) * (1 + npc.anger * 0.2);
+    npc.alert = Math.min(1, npc.alert + gain * dt);
+  } else {
+    npc.alert = Math.max(0, npc.alert - (npc.state === "CHASE" ? 0.12 : 0.22) * dt);
+  }
+  npc.stateT += dt;
+
+  switch (npc.state) {
+    case "PATROL": {
+      if (p.seesCat && npc.alert >= 1) return startChase();
+      if (p.seesCat && npc.alert > 0.25) return investigate(npc.lastKnown, "gözünün ucunda bir şey kıpırdadı", "Hm? Kim var orada?");
+      if (p.heard) return investigate(p.heard, "bir ses duydu", "Bu ses de ne?");
+      const wp = PATROL[npc.wp];
+      npc.target = center(wp);
+      if (dist(npc, npc.target) < 4) {
+        if (wp.check) { setState("CHECK", "tezgahındaki balıkları sayıyor"); npc.checkWp = wp; npc.searchBase = npc.facing; }
+        else npc.wp = (npc.wp + 1) % PATROL.length;
+      }
+      break;
+    }
+    case "CHECK": {
+      if (p.seesCat && npc.alert >= 1) return startChase();
+      if (p.seesCat && npc.alert > 0.25) return investigate(npc.lastKnown, "sayarken bir şey gördü", "Hm?");
+      if (p.heard) return investigate(p.heard, "sayarken bir ses duydu", "Bu ses de ne?");
+      npc.target = null;
+      if (npc.stateT > 1.2) {
+        const spot = center(npc.checkWp);
+        const missing = fishes.filter(f => f.taken && !f.noticed && dist(f, spot) < 170);
+        npc.wp = (npc.wp + 1) % PATROL.length;
+        if (missing.length) {
+          missing.forEach(f => (f.noticed = true));
+          npc.anger = Math.min(3, npc.anger + missing.length);
+          npc.alert = Math.max(npc.alert, 0.5);
+          say("Balıklarım!! Kim aldı?!");
+          npc.searchBase = npc.facing;
+          setState("SEARCH", `${missing.length} balık eksik → öfke ${npc.anger}, görüş ve hız arttı`);
+        } else setState("PATROL", "tezgah tamam, devriyeye devam");
+      }
+      break;
+    }
+    case "INVESTIGATE": {
+      if (p.seesCat && npc.alert >= 1) return startChase();
+      if (p.seesCat) npc.target = { ...npc.lastKnown };
+      else if (p.heard) npc.target = p.heard;
+      if (dist(npc, npc.target) < 10 || npc.stateT > 9) {
+        npc.searchBase = npc.facing;
+        setState("SEARCH", "şüphelendiği yere vardı, etrafa bakıyor");
+      }
+      break;
+    }
+    case "CHASE": {
+      npc.target = { ...npc.lastKnown };
+      if (p.dist < 24) {
+        game.state = "lost"; game.msg = "Rıza seni yakaladı! Balıklar geri tezgaha.";
+        say("Yakaladım seni pisi!");
+        log("<b>Yakaladı</b> — kedi kolunun ulaşacağı mesafede");
+        return;
+      }
+      const lostFor = time - npc.lastSeenT;
+      if (!p.seesCat && (dist(npc, npc.target) < 10 || lostFor > 4)) {
+        npc.searchBase = npc.facing;
+        say("Nereye kayboldu bu...");
+        setState("SEARCH", "kediyi gözden kaybetti, son gördüğü yerde arıyor");
+      }
+      break;
+    }
+    case "SEARCH": {
+      npc.target = null;
+      if (p.seesCat && npc.alert >= 1) return startChase();
+      if (p.seesCat && npc.alert > 0.25) return investigate(npc.lastKnown, "ararken bir şey gördü", "Aha!");
+      if (p.heard) return investigate(p.heard, "ararken bir ses duydu", "Oradasın!");
+      if (npc.stateT > 4.5) {
+        npc.wp = nearestWaypoint();
+        say(npc.anger ? "Bir daha gelirsen görürsün..." : "Rüzgardır herhalde.");
+        setState("PATROL", "bir şey bulamadı, devriyeye döndü");
+      }
+      break;
+    }
+  }
+}
+
+function startChase() { say("HEY! Gel buraya pisi!"); setState("CHASE", "kediyi net gördü (şüphe dolu)"); }
+function investigate(pt, reason, line) { say(line); setState("INVESTIGATE", reason); npc.target = { ...pt }; }
+function nearestWaypoint() {
+  let best = 0;
+  PATROL.forEach((w, i) => { if (dist(center(w), npc) < dist(center(PATROL[best]), npc)) best = i; });
+  return best;
+}
+function say(text) { npc.bubble = { text, t: time }; }
+
+// ---------- NPC: EYLEM ----------
+function act(dt) {
+  const speed = { PATROL: WALK, CHECK: 0, INVESTIGATE: INVESTIGATE_SPEED, CHASE: runSpeed(), SEARCH: 0 }[npc.state];
+  let wantFacing = null;
+
+  if (npc.target && speed > 0) {
+    npc.repathT -= dt;
+    const tt = toTile(npc.target.x, npc.target.y);
+    if (npc.repathT <= 0 || !npc.pathTarget || tt.x !== npc.pathTarget.x || tt.y !== npc.pathTarget.y) {
+      npc.path = findPath(toTile(npc.x, npc.y), tt); npc.pathTarget = tt; npc.repathT = 0.3;
+    }
+    const step = npc.path.length ? center(npc.path[0]) : npc.target;
+    const d = dist(npc, step);
+    if (d < 3 && npc.path.length) npc.path.shift();
+    if (d > 0.5) {
+      const mv = Math.min(d, speed * dt);
+      moveWithCollision(npc, (step.x - npc.x) / d * mv, (step.y - npc.y) / d * mv, 12);
+      wantFacing = Math.atan2(step.y - npc.y, step.x - npc.x);
+    }
+  }
+  // Bakış yönü: gördüğü/duyduğu şeye döner, aramada etrafı tarar.
+  if (npc.percept.seesCat && npc.state !== "PATROL") wantFacing = Math.atan2(player.y - npc.y, player.x - npc.x);
+  if (npc.state === "SEARCH" || npc.state === "CHECK") wantFacing = npc.searchBase + Math.sin(npc.stateT * 1.8) * 1.4;
+  if (wantFacing !== null) {
+    const turn = (npc.state === "CHASE" ? 7 : 3.5) * dt;
+    npc.facing += Math.max(-turn, Math.min(turn, angDiff(wantFacing, npc.facing)));
+  }
+}
+
+// ---------- çizim ----------
+function draw() {
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const c = map[y][x], px = x * TILE, py = y * TILE;
+    ctx.fillStyle = (x + y) % 2 ? "#cdbf9f" : "#d6c9aa";
+    ctx.fillRect(px, py, TILE, TILE);
+    if (c === "#") { ctx.fillStyle = "#3b3a40"; ctx.fillRect(px, py, TILE, TILE); }
+    if (c === "C") {
+      ctx.fillStyle = "#8a5a2b"; ctx.fillRect(px + 2, py + 2, TILE - 4, TILE - 4);
+      ctx.strokeStyle = "#5e3c1b"; ctx.lineWidth = 3;
+      ctx.strokeRect(px + 4, py + 4, TILE - 8, TILE - 8);
+      ctx.beginPath(); ctx.moveTo(px + 4, py + 4); ctx.lineTo(px + TILE - 4, py + TILE - 4);
+      ctx.moveTo(px + TILE - 4, py + 4); ctx.lineTo(px + 4, py + TILE - 4); ctx.stroke();
+    }
+    if (c === "S") {
+      ctx.fillStyle = "#b98a55"; ctx.fillRect(px + 1, py + 8, TILE - 2, TILE - 12);
+      for (let i = 0; i < 4; i++) { ctx.fillStyle = i % 2 ? "#f2efe6" : "#d9534f"; ctx.fillRect(px + i * 10, py + 2, 10, 8); }
+    }
+    if (c === "E") {
+      ctx.fillStyle = "#3f9b5c"; ctx.fillRect(px, py, TILE, TILE);
+      ctx.fillStyle = "#fff"; ctx.font = "bold 10px system-ui"; ctx.textAlign = "center";
+      ctx.fillText("ÇIKIŞ", px + TILE / 2, py + TILE / 2 + 4);
+    }
+  }
+  for (const f of fishes) if (!f.taken) drawFish(f.x, f.y);
+
+  if (showBrain) drawBrain();
+
+  // oyuncu (kedi)
+  ctx.save(); ctx.translate(player.x, player.y);
+  ctx.globalAlpha = player.sneaking ? 0.75 : 1;
+  ctx.fillStyle = "#f08a24";
+  ctx.beginPath(); ctx.moveTo(-11, -6); ctx.lineTo(-7, -16); ctx.lineTo(-2, -9); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(11, -6); ctx.lineTo(7, -16); ctx.lineTo(2, -9); ctx.fill();
+  ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#222"; ctx.fillRect(-5, -3, 3, 3); ctx.fillRect(2, -3, 3, 3);
+  ctx.restore();
+
+  // NPC (Rıza)
+  ctx.save(); ctx.translate(npc.x, npc.y);
+  ctx.fillStyle = "#2f5d8a"; ctx.beginPath(); ctx.arc(0, 0, 14, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = "#f1c9a0"; ctx.beginPath();
+  ctx.arc(Math.cos(npc.facing) * 6, Math.sin(npc.facing) * 6, 7, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  const mark = { INVESTIGATE: "?", SEARCH: "?", CHASE: "!" }[npc.state];
+  if (mark) { ctx.fillStyle = STATE_INFO[npc.state].color; ctx.font = "bold 20px system-ui"; ctx.textAlign = "center"; ctx.fillText(mark, npc.x, npc.y - 20); }
+  if (npc.bubble && time - npc.bubble.t < 2) drawBubble(npc.x, npc.y - 36, npc.bubble.text);
+
+  // HUD
+  ctx.fillStyle = "rgba(0,0,0,.55)"; ctx.fillRect(8, 8, 190, 26);
+  ctx.fillStyle = "#fff"; ctx.font = "bold 14px system-ui"; ctx.textAlign = "left";
+  ctx.fillText(`Balık: ${player.fish}/${fishes.length}  (gereken ${NEED})`, 16, 26);
+  if (game.hint) drawBanner(game.hint, 40);
+  if (game.state !== "play") {
+    ctx.fillStyle = "rgba(0,0,0,.6)"; ctx.fillRect(0, 0, cv.width, cv.height);
+    ctx.fillStyle = "#fff"; ctx.textAlign = "center"; ctx.font = "bold 26px system-ui";
+    const title = { intro: "Kaçak Pati", won: "Kazandın!", lost: "Yakalandın!" }[game.state];
+    ctx.fillText(title, cv.width / 2, cv.height / 2 - 10);
+    ctx.font = "16px system-ui";
+    ctx.fillText(game.state === "intro" ? "Başlamak için bir tuşa bas" : `${game.msg}  —  R ile tekrar`, cv.width / 2, cv.height / 2 + 20);
+  }
+}
+
+function drawBrain() {
+  const color = STATE_INFO[npc.state].color, range = visionRange();
+  // Görüş konisi: duvar/sandıkta kesilen ışınlarla çizilir.
+  ctx.beginPath(); ctx.moveTo(npc.x, npc.y);
+  for (let i = 0; i <= 32; i++) {
+    const a = npc.facing - FOV / 2 + FOV * i / 32;
+    let r = 0;
+    while (r < range && !blocksSight(tileAt(npc.x + Math.cos(a) * r, npc.y + Math.sin(a) * r))) r += 4;
+    ctx.lineTo(npc.x + Math.cos(a) * r, npc.y + Math.sin(a) * r);
+  }
+  ctx.closePath(); ctx.fillStyle = color + "40"; ctx.fill(); ctx.strokeStyle = color + "aa"; ctx.lineWidth = 1; ctx.stroke();
+  // Ses dalgası
+  if (noise && time - noise.t < 0.35) {
+    ctx.strokeStyle = `rgba(255,255,255,${0.5 - (time - noise.t)})`; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(noise.x, noise.y, noise.r * Math.min(1, (time - noise.t) / 0.2 + 0.3), 0, Math.PI * 2); ctx.stroke();
+  }
+  // Son bilinen konum + yol
+  if (npc.lastKnown && npc.state !== "PATROL" && npc.state !== "CHECK") {
+    ctx.strokeStyle = "#e0524a"; ctx.lineWidth = 2;
+    const { x, y } = npc.lastKnown;
+    ctx.beginPath(); ctx.moveTo(x - 7, y - 7); ctx.lineTo(x + 7, y + 7); ctx.moveTo(x + 7, y - 7); ctx.lineTo(x - 7, y + 7); ctx.stroke();
+  }
+  if (npc.path.length) {
+    ctx.strokeStyle = color; ctx.setLineDash([4, 5]); ctx.beginPath(); ctx.moveTo(npc.x, npc.y);
+    npc.path.forEach(t => { const c = center(t); ctx.lineTo(c.x, c.y); });
+    ctx.stroke(); ctx.setLineDash([]);
+  }
+}
+
+function drawFish(x, y) {
+  ctx.fillStyle = "#6fb3d9";
+  ctx.beginPath(); ctx.ellipse(x - 2, y, 9, 5, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(x + 6, y); ctx.lineTo(x + 12, y - 5); ctx.lineTo(x + 12, y + 5); ctx.fill();
+  ctx.fillStyle = "#123"; ctx.fillRect(x - 8, y - 2, 2, 2);
+}
+function drawBubble(x, y, text) {
+  ctx.font = "13px system-ui"; ctx.textAlign = "center";
+  const w = ctx.measureText(text).width + 14;
+  const bx = Math.max(4, Math.min(cv.width - w - 4, x - w / 2));
+  ctx.fillStyle = "#fff"; ctx.fillRect(bx, y - 16, w, 22);
+  ctx.fillStyle = "#222"; ctx.fillText(text, bx + w / 2, y - 1);
+}
+function drawBanner(text, y) {
+  ctx.font = "14px system-ui"; ctx.textAlign = "center";
+  const w = ctx.measureText(text).width + 20;
+  ctx.fillStyle = "rgba(0,0,0,.7)"; ctx.fillRect(cv.width / 2 - w / 2, y, w, 26);
+  ctx.fillStyle = "#fff"; ctx.fillText(text, cv.width / 2, y + 18);
+}
+
+// ---------- panel ----------
+const $ = id => document.getElementById(id);
+function updatePanel() {
+  const info = STATE_INFO[npc.state], p = npc.percept;
+  $("st").textContent = info.label; $("st").style.color = info.color;
+  $("alert").style.width = (npc.alert * 100).toFixed(0) + "%";
+  $("alert").style.background = npc.alert >= 1 ? "var(--chase)" : "var(--suspicious)";
+  $("anger").textContent = npc.anger;
+  $("pSee").innerHTML = p.seesCat ? '<span class="yes">EVET</span>' : '<span class="no">hayır</span>';
+  $("pHear").innerHTML = p.heard ? '<span class="yes">EVET</span>' : '<span class="no">hayır</span>';
+  $("pLast").textContent = npc.lastKnown ? `(${toTile(npc.lastKnown.x, npc.lastKnown.y).x}, ${toTile(npc.lastKnown.x, npc.lastKnown.y).y}) · ${(time - npc.lastSeenT).toFixed(1)} sn önce` : "yok";
+  $("pRange").textContent = `${visionRange()} px, koşu hızı ${runSpeed()}`;
+  $("log").innerHTML = logEntries.map(e => `<li>${e.t.toFixed(1)} sn · ${e.text}</li>`).join("");
+}
+
+// ---------- döngü ----------
+let last = performance.now();
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (game.state === "play") {
+    time += dt;
+    updatePlayer(dt);
+    if (game.state === "play") { perceive(); decide(dt); act(dt); }
+  }
+  draw(); updatePanel();
+  requestAnimationFrame(frame);
+}
+addEventListener("keydown", e => {
+  keys[e.code] = true;
+  if (e.code.startsWith("Arrow") || e.code === "Space") e.preventDefault();
+  if (e.code === "KeyH") showBrain = !showBrain;
+  if (e.code === "KeyR") { reset(); game.state = "play"; }
+  else if (game.state === "intro") game.state = "play";
+});
+addEventListener("keyup", e => { keys[e.code] = false; });
+reset();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
