@@ -3,7 +3,7 @@
 "Design a Game With an AI Co-Designer" (60 dk) görevi için hazırlandı.
 
 - **[TASARIM.md](TASARIM.md):** Görevin 5 adımı ve final tartışması (fikir, NPC tasarımı, AI'yı kırma, AI eleştirmen, konsept).
-- **[oyun/index.html](oyun/index.html):** Oynanabilir prototip. Kurulum gerekmez, dosyayı tarayıcıda aç.
+- **[oyun/index.html](oyun/index.html):** Oynanabilir prototip. Kurulum gerekmez, dosyayı tarayıcıda aç. Telefonda da dokunmatik tuşlarla oynanır.
 
 ## Nasıl oynanır
 - **WASD / Oklar:** hareket

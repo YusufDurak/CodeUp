@@ -6,7 +6,7 @@
 <title>Kaçak Pati</title>
 <style>
   :root {
-    --bg: #1b1d22; --panel: #262930; --text: #e8e6e1; --muted: #9a9ca3;
+    color-scheme: dark; --bg: #1b1d22; --panel: #262930; --text: #e8e6e1; --muted: #9a9ca3;
     --patrol: #4caf7a; --suspicious: #e8b53a; --chase: #e0524a; --search: #6aa3e0;
   }
   * { box-sizing: border-box; }
@@ -25,16 +25,44 @@
   .log b { color: var(--text); font-weight: 600; }
   kbd { background: #111; border: 1px solid #444; border-radius: 3px; padding: 0 4px; font-size: 12px; }
   .yes { color: var(--chase); font-weight: 600; } .no { color: var(--muted); }
+  .game { display: flex; flex-direction: column; gap: 12px; max-width: 800px; width: 100%; min-width: 0; }
+  .touch { display: none; justify-content: space-between; align-items: center; gap: 12px; }
+  @media (pointer: coarse) { .touch { display: flex; } }
+  .pad { display: grid; grid-template-columns: repeat(3, 56px); grid-template-rows: repeat(2, 56px); gap: 6px; }
+  .touch button { font: 600 16px system-ui, sans-serif; color: var(--text); background: var(--panel); border: 1px solid #444;
+    border-radius: 10px; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .touch button:active, .touch button.on { background: #3a3f4a; border-color: var(--suspicious); }
+  .pad [data-k="ArrowUp"] { grid-column: 2; }
+  .pad [data-k="ArrowLeft"] { grid-column: 1; grid-row: 2; }
+  .pad [data-k="ArrowDown"] { grid-column: 2; grid-row: 2; }
+  .pad [data-k="ArrowRight"] { grid-column: 3; grid-row: 2; }
+  .side { display: flex; flex-direction: column; gap: 6px; }
+  .side button { padding: 12px 16px; }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <canvas id="c" width="800" height="560"></canvas>
+  <div class="game">
+    <canvas id="c" width="800" height="560"></canvas>
+    <div class="touch">
+      <div class="pad">
+        <button data-k="ArrowUp" aria-label="Yukarı">▲</button>
+        <button data-k="ArrowLeft" aria-label="Sol">◀</button>
+        <button data-k="ArrowDown" aria-label="Aşağı">▼</button>
+        <button data-k="ArrowRight" aria-label="Sağ">▶</button>
+      </div>
+      <div class="side">
+        <button id="tSneak">Sinsi yürü</button>
+        <button id="tBrain">AI beyni</button>
+        <button id="tReset">Yeniden başla</button>
+      </div>
+    </div>
+  </div>
   <div class="panel">
     <h1>Kaçak Pati</h1>
     <div>Pazardan en az <b>5 balık</b> çal ve sağdaki <b>ÇIKIŞ</b>'tan kaç. Balıkçı Rıza'ya yakalanma!</div>
     <h2>Kontroller</h2>
-    <div><kbd>WASD</kbd>/<kbd>Oklar</kbd> hareket · <kbd>Shift</kbd> sinsi yürü (sessiz, yavaş) · <kbd>H</kbd> AI beynini göster/gizle · <kbd>R</kbd> yeniden başla</div>
+    <div><kbd>WASD</kbd>/<kbd>Oklar</kbd> hareket · <kbd>Shift</kbd> sinsi yürü (sessiz, yavaş) · <kbd>H</kbd> AI beynini göster/gizle · <kbd>R</kbd> yeniden başla. Telefonda ekrandaki tuşları kullan.</div>
 
     <h2>Rıza'nın beyni</h2>
     <div class="state" id="st">—</div>
@@ -403,7 +431,7 @@ function draw() {
     const title = { intro: "Kaçak Pati", won: "Kazandın!", lost: "Yakalandın!" }[game.state];
     ctx.fillText(title, cv.width / 2, cv.height / 2 - 10);
     ctx.font = "16px system-ui";
-    ctx.fillText(game.state === "intro" ? "Başlamak için bir tuşa bas" : `${game.msg}  —  R ile tekrar`, cv.width / 2, cv.height / 2 + 20);
+    ctx.fillText(game.state === "intro" ? "Başlamak için bir tuşa bas ya da dokun" : `${game.msg}  —  R ile tekrar`, cv.width / 2, cv.height / 2 + 20);
   }
 }
 
@@ -491,6 +519,23 @@ addEventListener("keydown", e => {
   else if (game.state === "intro") game.state = "play";
 });
 addEventListener("keyup", e => { keys[e.code] = false; });
+
+// Dokunmatik kontroller
+const startIfIntro = () => { if (game.state === "intro") game.state = "play"; };
+document.querySelectorAll("[data-k]").forEach(b => {
+  const k = b.dataset.k;
+  b.addEventListener("pointerdown", e => { e.preventDefault(); keys[k] = true; startIfIntro(); });
+  ["pointerup", "pointercancel", "pointerleave"].forEach(t => b.addEventListener(t, () => { keys[k] = false; }));
+});
+$("tSneak").addEventListener("click", () => {
+  keys.ShiftLeft = !keys.ShiftLeft; $("tSneak").classList.toggle("on", keys.ShiftLeft);
+});
+$("tBrain").addEventListener("click", () => { showBrain = !showBrain; });
+$("tReset").addEventListener("click", () => { reset(); game.state = "play"; });
+cv.addEventListener("pointerdown", () => {
+  if (game.state === "intro") game.state = "play";
+  else if (game.state !== "play") { reset(); game.state = "play"; }
+});
 reset();
 requestAnimationFrame(frame);
 </script>
